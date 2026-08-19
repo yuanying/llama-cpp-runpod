@@ -211,14 +211,32 @@ IMAGE=llama-cpp-runpod:test ./test/test-image.sh
 ### CI と公開
 
 `.github/workflows/build.yml` が push ごとにビルド → テスト → `ghcr.io` へ push する。
-タグは `latest`（デフォルトブランチのみ）、ブランチ名、短縮 SHA。
 
-**GHCR のパッケージは初回 push 後に手動で public にする必要がある。** リポジトリが public でも
-パッケージは private で作られ、private のままだと GitHub Free の無料枠（500MB / 1GB 転送）を
-即超えて課金対象になる。
+タグの付き方:
 
-<https://github.com/users/yuanying/packages/container/llama-cpp-runpod/settings> の
-"Change visibility" から Public に変更する。匿名で pull できるかは docker 無しで確認できる。
+| 契機 | 付くタグ |
+|---|---|
+| デフォルトブランチ（`main`）への push | `latest`、`main`、`sha-xxxxxxx` |
+| それ以外のブランチへの push | `<ブランチ名>`、`sha-xxxxxxx` |
+| Pull Request | push しない（ビルドとテストのみ） |
+
+**`latest` が付くのは `main` への push だけ。** 作業ブランチから push した時点では
+`ghcr.io/yuanying/llama-cpp-runpod:latest` は 404 のままで、ブランチ名と短縮 SHA の
+タグだけが存在する。
+
+### パッケージの visibility
+
+**public リポジトリから `GITHUB_TOKEN` で push した場合、パッケージも public で作られた**
+（2026-08 時点で実測）。手作業は要らなかった。
+
+念のため初回 push 後に確認しておくとよい。private のままだと GitHub Free の無料枠
+（500MB ストレージ / 1GB 転送・月）を数GBのイメージが即超えて課金対象になる。
+
+```bash
+gh api /user/packages/container/llama-cpp-runpod --jq '{visibility, repository: .repository.full_name}'
+```
+
+匿名で pull できるかは docker も認証も無しで確認できる。
 
 ```bash
 TOKEN=$(curl -s "https://ghcr.io/token?scope=repository:yuanying/llama-cpp-runpod:pull&service=ghcr.io" | jq -r .token)
@@ -227,4 +245,11 @@ curl -s -o /dev/null -w '%{http_code}\n' -H "Authorization: Bearer $TOKEN" \
   https://ghcr.io/v2/yuanying/llama-cpp-runpod/manifests/latest
 ```
 
-200 なら public。private のままだと 401/403 が返る。
+200 なら public。private なら 401/403 が返る（タグ自体が無い場合も 404 になるので、
+`latest` が未作成のうちはブランチ名のタグで確かめる）。
+
+もし private で作られていたら、**Web UI でしか直せない**。REST API には visibility を
+変更するエンドポイントが無く、`PATCH /user/packages/container/<pkg>` の類はすべて 404 を返す
+（`write:packages` スコープがあっても同じ）。
+<https://github.com/users/yuanying/packages/container/llama-cpp-runpod/settings> の
+"Change visibility" から Public にする。
