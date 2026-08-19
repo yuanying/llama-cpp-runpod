@@ -218,11 +218,15 @@ IMAGE=llama-cpp-runpod:test ./test/test-image.sh
 |---|---|
 | デフォルトブランチ（`main`）への push | `latest`、`main`、`sha-xxxxxxx` |
 | それ以外のブランチへの push | `<ブランチ名>`、`sha-xxxxxxx` |
-| Pull Request | push しない（ビルドとテストのみ） |
 
 **`latest` が付くのは `main` への push だけ。** 作業ブランチから push した時点では
 `ghcr.io/yuanying/llama-cpp-runpod:latest` は 404 のままで、ブランチ名と短縮 SHA の
 タグだけが存在する。
+
+トリガは push（全ブランチ）と `workflow_dispatch` のみで、**`pull_request` では走らない**。
+同じコミットのビルドが 2 本走るのを避けるためで（CUDA ビルドは 1 本 40分弱かかる）、
+PR のチェックとしてはブランチへの push の run がそのまま表示される。fork からの PR を
+受けるようになったら `pull_request` を足す必要がある。
 
 ### パッケージの visibility
 

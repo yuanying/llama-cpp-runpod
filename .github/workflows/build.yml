@@ -1,10 +1,18 @@
 name: build
 
+# pull_request トリガは付けない。push: '**' が全ブランチをカバーしており、
+# 同一リポジトリ内のブランチから PR を出すと同じコミットのビルドが 2 本走るため
+# (CUDA ビルドで 1 本 40分弱)。push 由来の run が PR のチェックとして表示される。
+# fork からの PR を受けるようになったら、その時点で pull_request を足す。
 on:
   push:
     branches: ['**']
-  pull_request:
   workflow_dispatch:
+
+# 同じ ref に連続で push したら、走っている古い run は捨てる。
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   REGISTRY: ghcr.io
@@ -58,7 +66,6 @@ jobs:
           tags: |
             type=raw,value=latest,enable={{is_default_branch}}
             type=ref,event=branch
-            type=ref,event=pr
             type=sha,format=short
 
       # テストしてから push したいので、まずローカルの docker に load する。
@@ -88,7 +95,6 @@ jobs:
           df -h /
 
       - name: Log in to ghcr.io
-        if: github.event_name != 'pull_request'
         uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
@@ -96,7 +102,6 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Push image
-        if: github.event_name != 'pull_request'
         uses: docker/build-push-action@v6
         with:
           context: .
