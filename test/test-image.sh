@@ -101,7 +101,7 @@ fi
 ########################################
 head_ "2. PUBLIC_KEY ありで起動したとき"
 ########################################
-c_with=$(start_container with -e PUBLIC_KEY="$TEST_PUBLIC_KEY" -e RUNPOD_POD_ID=testpod0123 -e RUNPOD_DC_ID=TEST-DC-1)
+c_with=$(start_container with -e PUBLIC_KEY="$TEST_PUBLIC_KEY" -e RUNPOD_POD_ID=testpod0123 -e RUNPOD_DC_ID=TEST-DC-1 -e MY_CUSTOM_VAR=hello)
 if [ -z "${c_with:-}" ] || ! wait_running "$c_with"; then
   ng "PUBLIC_KEY ありでコンテナが起動する" "$(docker logs "$PREFIX-with" 2>&1 | tail -5 | tr '\n' ' ')"
 else
@@ -159,6 +159,16 @@ else
        "$(cexec "$c_with" 'cat /etc/rp_environment' | tr '\n' ' ')"
   fi
 
+  # RunPod のテンプレートでユーザーが自分で設定した任意の環境変数も見えること。
+  # 上流は「大文字始まりの変数を全部書き出し PUBLIC_KEY だけ除外」なので、
+  # RUNPOD_* だけの許可リストにするとここで落ちる。
+  if cexec "$c_with" 'grep -q "^export MY_CUSTOM_VAR=" /etc/rp_environment' >/dev/null 2>&1; then
+    ok "/etc/rp_environment に任意のユーザー環境変数が書き出される"
+  else
+    ng "/etc/rp_environment に任意のユーザー環境変数が書き出される" \
+       "$(cexec "$c_with" 'cat /etc/rp_environment' | tr '\n' ' ')"
+  fi
+
   if cexec "$c_with" 'grep -q "/etc/rp_environment" /root/.bashrc' >/dev/null 2>&1; then
     ok "~/.bashrc が /etc/rp_environment を source する"
   else
@@ -175,15 +185,21 @@ else
   ########################################
   head_ "3. 同梱ソフトウェア"
   ########################################
-  check "llama-server --version が動く" cexec "$c_with" 'llama-server --version'
-  check "llama-cli --version が動く"    cexec "$c_with" 'llama-cli --version'
+  # CUDA ドライバ (libcuda.so.1) は GPU ホスト上では NVIDIA のコンテナランタイムが
+  # 注入するもので、イメージには含まれない。GPU の無い環境で llama.cpp の依存関係を
+  # 検査するために、ベースイメージ同梱の CUDA forward-compat 版で解決させる。
+  # ここで見たいのは COPY 漏れ (libcurl / libgomp / libggml-*) の方。
+  CUDA_STUB='LD_LIBRARY_PATH=/usr/local/cuda/compat:$LD_LIBRARY_PATH'
 
-  notfound=$(cexec "$c_with" 'ldd "$(command -v llama-server)" 2>&1 | grep -c "not found"' 2>/dev/null | tr -d '\r\n')
+  check "llama-server --version が動く" cexec "$c_with" "$CUDA_STUB llama-server --version"
+  check "llama-cli --version が動く"    cexec "$c_with" "$CUDA_STUB llama-cli --version"
+
+  notfound=$(cexec "$c_with" "$CUDA_STUB ldd \"\$(command -v llama-server)\" 2>&1 | grep -c 'not found'" 2>/dev/null | tr -d '\r\n')
   if [ "$notfound" = "0" ]; then
     ok "ldd \$(which llama-server) に not found が無い"
   else
     ng "ldd \$(which llama-server) に not found が無い" \
-       "$(cexec "$c_with" 'ldd "$(command -v llama-server)" | grep "not found"' | tr '\n' ' ')"
+       "$(cexec "$c_with" "$CUDA_STUB ldd \"\$(command -v llama-server)\" | grep 'not found'" | tr '\n' ' ')"
   fi
 
   check "python -c 'import torch' が動く" cexec "$c_with" 'python -c "import torch; print(torch.__version__)"'
