@@ -34,7 +34,7 @@ PTX フォールバックも入れていないので、他世代で使うなら 
 **含まれないもの**
 
 - **モデルの重み**（GGUF 等）— Network Volume に置く
-- API キー・トークンの類
+- API キー・トークンの類 — Pod の環境変数で渡す（→[Hugging Face のトークンを渡す](#hugging-face-のトークンを渡す)）
 - **SSH ホスト鍵** — Pod 起動のたびに生成する（後述）
 
 ## Pod を作る
@@ -48,7 +48,7 @@ rp() { curl -sS -H "Authorization: Bearer $RUNPOD_API_KEY" -H 'Content-Type: app
 
 rp -X POST "$RP/pods" -d "$(jq -n \
   --arg img 'ghcr.io/yuanying/llama-cpp-runpod:latest' \
-  --arg gpu "$GPU_ID" --arg vol "$VOL" --arg dc "$DC" '
+  --arg gpu "$GPU_ID" --arg vol "$VOL" --arg dc "$DC" --arg hf "$HF_TOKEN" '
 {
   name:  "llama",
   image: $img,
@@ -58,9 +58,14 @@ rp -X POST "$RP/pods" -d "$(jq -n \
   disk:  40,
   ports: ["8000/http", "22/tcp"],
   startSsh: true,
+  env:   { HF_TOKEN: $hf },
   mounts: { network: [ { volumeId: $vol, path: "/workspace" } ] }
 }')" | jq
 ```
+
+`env` はオブジェクト形式（`{"KEY": "value"}`）。gated / private なモデルを引くなら
+ここで `HF_TOKEN` を渡す（→[Hugging Face のトークンを渡す](#hugging-face-のトークンを渡す)）。
+不要なら `env` ごと省いてよい。
 
 RunPod API v2 は ENTRYPOINT を上書きできないため、このイメージの ENTRYPOINT は
 「`PUBLIC_KEY` を展開して sshd を上げ、あとは常駐するだけ」になっている。
@@ -118,6 +123,46 @@ ssh -f -N -L 8000:localhost:8000 runpod-llama
 ```bash
 hf download <repo> --include '*Q6_K*' --local-dir /workspace/models/<name>
 ```
+
+## Hugging Face のトークンを渡す
+
+gated / private なリポジトリを引くにはトークンが要る。**イメージには絶対に焼かないこと。**
+このイメージは public なので、焼けばトークンがそのまま世界に公開される。
+
+### 推奨: Pod 作成時の `env` で渡す
+
+上の Pod 作成例の `env: { HF_TOKEN: $hf }` がそれ。Pod にだけ渡り、ディスクには残らない。
+
+これが SSH ログイン後にも効くのは、起動スクリプトが**大文字始まりの環境変数をすべて**
+`/etc/rp_environment`（`chmod 600`）に書き出し、`~/.bashrc` からそれを source するため
+（`PUBLIC_KEY` だけは除外している）。`RUNPOD_*` に限らずユーザーが `env` で渡した変数も
+そのまま見えるので、SSH で入って `hf download` を叩けば認証済みになる。
+
+```bash
+ssh runpod-llama
+echo "${HF_TOKEN:0:8}..."      # /etc/rp_environment 経由で見える
+hf download <repo> --include '*Q6_K*' --local-dir /workspace/models/<name>
+```
+
+**Pod に SSH できる人はこのトークンを読める。** `/etc/rp_environment` は root しか読めないが、
+SSH で入るのは root なので実質的に筒抜けになる。read 権限のみの fine-grained トークンを使い、
+用が済んだら失効させること。
+
+### 代替: `hf auth login`
+
+`HF_HOME=/workspace/hf` なので、一度ログインすればトークンは Network Volume 側に残り、
+次回以降の Pod でも効く。
+
+```bash
+hf auth login          # 対話でトークンを貼る
+```
+
+ただし **トークンは Volume に平文で残る**（`$HF_HOME/token`）。Volume を消し忘れれば残り続け、
+その Volume をマウントした別の Pod からも読める。加えて Network Volume はデータセンターに
+固定されるので、別 DC で Pod を立てると結局トークンを渡し直すことになる。
+
+**`env` の方を勧める。** Pod の寿命と一致して後片付けが要らず、Volume に秘密が残らないため。
+毎回同じトークンを打ち直す手間が惜しい場合だけ `hf auth login` を使う。
 
 ## RunPod 公式イメージとの違い
 
