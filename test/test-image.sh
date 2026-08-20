@@ -210,10 +210,106 @@ else
   else
     ng "PyTorch が CUDA ビルドである" "torch.version.cuda=${cuda_ok:-なし}"
   fi
+
+  # hf_transfer は使われなくなり HF_HUB_ENABLE_HF_TRANSFER は deprecated。
+  # 後継は Xet の HF_XET_HIGH_PERFORMANCE。
+  if cexec "$c_with" 'test "$HF_XET_HIGH_PERFORMANCE" = 1' >/dev/null 2>&1; then
+    ok "HF_XET_HIGH_PERFORMANCE=1 が設定されている"
+  else
+    ng "HF_XET_HIGH_PERFORMANCE=1 が設定されている" \
+       "実際: $(cexec "$c_with" 'printenv HF_XET_HIGH_PERFORMANCE' 2>/dev/null | tr -d '\r\n')"
+  fi
+
+  if cexec "$c_with" 'test -z "$HF_HUB_ENABLE_HF_TRANSFER"' >/dev/null 2>&1; then
+    ok "deprecated な HF_HUB_ENABLE_HF_TRANSFER が設定されていない"
+  else
+    ng "deprecated な HF_HUB_ENABLE_HF_TRANSFER が設定されていない"
+  fi
+
+  mode=$(cexec "$c_with" 'stat -c %a /etc/rp_environment' 2>/dev/null | tr -d '\r\n')
+  if [ "$mode" = "600" ]; then
+    ok "/etc/rp_environment のパーミッションが 600"
+  else
+    ng "/etc/rp_environment のパーミッションが 600" "実際: ${mode:-なし}"
+  fi
+
+  ########################################
+  head_ "4. SSH セッションの環境"
+  ########################################
+  # RunPod での実運用は `ssh <pod> <command>` が中心になる。これは非対話・非ログイン
+  # シェルで、しかも sshd は自分の環境を session に渡さないため、PATH は sshd の既定値
+  # (/usr/local/bin:/usr/bin:...) になり /opt/llama.cpp/bin が入らない。
+  # /etc/rp_environment を ~/.bashrc の末尾で source するだけだと、Ubuntu の .bashrc が
+  # 冒頭の `[ -z "$PS1" ] && return` で抜けるのでこの経路では読まれない。
+  # コンテナ内から自分自身へ SSH して、その経路を実際に通す。
+  if cexec "$c_with" 'ssh-keygen -q -t ed25519 -f /tmp/testkey -N "" && cat /tmp/testkey.pub >> /root/.ssh/authorized_keys && chmod 600 /root/.ssh/authorized_keys' >/dev/null 2>&1; then
+    ok "テスト用の鍵を authorized_keys に追加できる"
+  else
+    ng "テスト用の鍵を authorized_keys に追加できる"
+  fi
+
+  # ssh_exec <container> <remote command>   (remote command にシングルクォートは使わない)
+  ssh_exec() {
+    docker exec "$1" bash -c "ssh -q -i /tmp/testkey -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o BatchMode=yes root@127.0.0.1 '$2'" 2>&1
+  }
+
+  # 非対話・非ログインシェル: ssh <host> <command>
+  out=$(ssh_exec "$c_with" 'command -v llama-server' | tr -d '\r\n')
+  if [ "$out" = "/opt/llama.cpp/bin/llama-server" ]; then
+    ok "ssh <host> <command> (非対話) から llama-server が引ける"
+  else
+    ng "ssh <host> <command> (非対話) から llama-server が引ける" "実際: ${out:-なし}"
+  fi
+
+  out=$(ssh_exec "$c_with" 'printenv MY_CUSTOM_VAR' | tr -d '\r\n')
+  if [ "$out" = "hello" ]; then
+    ok "ssh <host> <command> (非対話) からユーザー環境変数が見える"
+  else
+    ng "ssh <host> <command> (非対話) からユーザー環境変数が見える" "実際: ${out:-なし}"
+  fi
+
+  out=$(ssh_exec "$c_with" 'printenv RUNPOD_POD_ID' | tr -d '\r\n')
+  if [ "$out" = "testpod0123" ]; then
+    ok "ssh <host> <command> (非対話) から RUNPOD_* が見える"
+  else
+    ng "ssh <host> <command> (非対話) から RUNPOD_* が見える" "実際: ${out:-なし}"
+  fi
+
+  # ログインシェル: ssh <host> bash -lc "..."
+  out=$(ssh_exec "$c_with" 'bash -lc "command -v llama-server"' | tr -d '\r\n')
+  if [ "$out" = "/opt/llama.cpp/bin/llama-server" ]; then
+    ok "ログインシェル (bash -lc) から llama-server が引ける"
+  else
+    ng "ログインシェル (bash -lc) から llama-server が引ける" "実際: ${out:-なし}"
+  fi
+
+  out=$(ssh_exec "$c_with" 'bash -lc "printenv MY_CUSTOM_VAR"' | tr -d '\r\n')
+  if [ "$out" = "hello" ]; then
+    ok "ログインシェル (bash -lc) からユーザー環境変数が見える"
+  else
+    ng "ログインシェル (bash -lc) からユーザー環境変数が見える" "実際: ${out:-なし}"
+  fi
+
+  # 何度 source されても PATH が二重に前置されないこと
+  n=$(ssh_exec "$c_with" 'bash -lc "printenv PATH"' | tr ':' '\n' | grep -c '^/opt/llama.cpp/bin$')
+  if [ "$n" = "1" ]; then
+    ok "PATH に /opt/llama.cpp/bin が二重に入らない"
+  else
+    ng "PATH に /opt/llama.cpp/bin が二重に入らない" "出現回数: $n"
+  fi
+
+  # 起動スクリプトを再実行しても ~/.bashrc に重複追記されないこと
+  cexec "$c_with" '/usr/local/bin/start.sh true' >/dev/null 2>&1
+  n=$(cexec "$c_with" "grep -v '^[[:space:]]*#' /root/.bashrc | grep -c /etc/rp_environment" 2>/dev/null | tr -d '\r\n')
+  if [ "$n" = "1" ]; then
+    ok "起動スクリプトを再実行しても ~/.bashrc に重複追記されない"
+  else
+    ng "起動スクリプトを再実行しても ~/.bashrc に重複追記されない" "出現回数: ${n:-不明}"
+  fi
 fi
 
 ########################################
-head_ "4. PUBLIC_KEY なしで起動したとき"
+head_ "5. PUBLIC_KEY なしで起動したとき"
 ########################################
 c_without=$(start_container without)
 if [ -z "${c_without:-}" ] || ! wait_running "$c_without"; then
