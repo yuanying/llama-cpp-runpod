@@ -74,7 +74,9 @@ LABEL org.opencontainers.image.source="https://github.com/yuanying/llama-cpp-run
       org.opencontainers.image.description="RunPod-ready CUDA image with sshd, PyTorch and a prebuilt llama.cpp (sm_120)" \
       org.opencontainers.image.licenses="MIT"
 
-ENV DEBIAN_FRONTEND=noninteractive
+# ENV ではなく ARG。ENV にするとイメージに焼かれて SSH セッションにも漏れ、
+# Pod 内で apt を叩いたときに常に非対話モードになってしまう。
+ARG DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates \
@@ -110,7 +112,7 @@ RUN pip install --no-cache-dir --break-system-packages \
         --index-url "https://download.pytorch.org/whl/${TORCH_CUDA_INDEX}" \
         "torch==${TORCH_VERSION}" \
     && pip install --no-cache-dir --break-system-packages \
-        "huggingface_hub[cli,hf_transfer]"
+        "huggingface_hub[cli]"
 
 COPY --from=builder /opt/llama.cpp /opt/llama.cpp
 RUN echo /opt/llama.cpp/lib > /etc/ld.so.conf.d/llama-cpp.conf && ldconfig
@@ -118,9 +120,11 @@ RUN echo /opt/llama.cpp/lib > /etc/ld.so.conf.d/llama-cpp.conf && ldconfig
 COPY docker/start.sh /usr/local/bin/start.sh
 RUN chmod +x /usr/local/bin/start.sh
 
+# HF_XET_HIGH_PERFORMANCE: 転送は Xet に置き換わっており、hf_transfer と
+# HF_HUB_ENABLE_HF_TRANSFER は deprecated (指定すると警告が出る)。
 ENV PATH=/opt/llama.cpp/bin:${PATH} \
     HF_HOME=/workspace/hf \
-    HF_HUB_ENABLE_HF_TRANSFER=1
+    HF_XET_HIGH_PERFORMANCE=1
 
 # RunPod の Network Volume のマウント先
 WORKDIR /workspace
