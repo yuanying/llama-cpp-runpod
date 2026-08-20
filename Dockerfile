@@ -74,7 +74,9 @@ LABEL org.opencontainers.image.source="https://github.com/yuanying/llama-cpp-run
       org.opencontainers.image.description="RunPod-ready CUDA image with sshd, PyTorch and a prebuilt llama.cpp (sm_120)" \
       org.opencontainers.image.licenses="MIT"
 
-ENV DEBIAN_FRONTEND=noninteractive
+# ENV ではなく ARG。ENV にするとイメージに焼かれて SSH セッションにも漏れ、
+# Pod 内で apt を叩いたときに常に非対話モードになってしまう。
+ARG DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates \

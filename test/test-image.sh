@@ -226,6 +226,15 @@ else
     ng "deprecated な HF_HUB_ENABLE_HF_TRANSFER が設定されていない"
   fi
 
+  # ビルド時にだけ要る変数。イメージに残すと SSH セッションにも漏れて apt が
+  # 常に非対話モードになる。
+  if cexec "$c_with" 'test -z "$DEBIAN_FRONTEND"' >/dev/null 2>&1; then
+    ok "ビルド時専用の DEBIAN_FRONTEND がイメージに残っていない"
+  else
+    ng "ビルド時専用の DEBIAN_FRONTEND がイメージに残っていない" \
+       "実際: $(cexec "$c_with" 'printenv DEBIAN_FRONTEND' 2>/dev/null | tr -d '\r\n')"
+  fi
+
   mode=$(cexec "$c_with" 'stat -c %a /etc/rp_environment' 2>/dev/null | tr -d '\r\n')
   if [ "$mode" = "600" ]; then
     ok "/etc/rp_environment のパーミッションが 600"
