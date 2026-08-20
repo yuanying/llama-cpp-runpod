@@ -29,7 +29,7 @@ PTX フォールバックも入れていないので、他世代で使うなら 
 - `llama-server` / `llama-cli` / `llama-bench` など llama.cpp のビルド済みバイナリ（`/opt/llama.cpp/bin`、PATH 済み）
 - PyTorch（CUDA ビルド）
 - sshd、`git` / `curl` / `jq` / `tmux` / `rsync`、`python3` + `pip`
-- `hf` CLI（`huggingface_hub[cli,hf_transfer]`）
+- `hf` CLI（`huggingface_hub[cli]`。転送は Xet、`HF_XET_HIGH_PERFORMANCE=1` 済み）
 
 **含まれないもの**
 
@@ -90,8 +90,20 @@ ssh runpod-llama
 その結果 Pod を作り直すたびにホスト鍵が変わり、既定の設定だと
 `REMOTE HOST IDENTIFICATION HAS CHANGED` で接続を拒否される。
 
-SSH でログインすると `/etc/rp_environment` が `~/.bashrc` から読み込まれ、`RUNPOD_POD_ID` などの
-RunPod が注入した環境変数が見えるようになっている（`PUBLIC_KEY` は除外してある）。
+sshd は自分の環境を SSH セッションに渡さないので、そのままだと `RUNPOD_POD_ID` も
+`/opt/llama.cpp/bin` を含む `PATH` も見えない。起動スクリプトが環境変数を
+`/etc/rp_environment` に書き出し、それを `/etc/profile.d/` と `~/.bashrc` の**先頭**の
+両方から読ませることで、**対話ログインでも `ssh <host> <command>` でも**同じように
+見えるようにしてある（`PUBLIC_KEY` は除外）。
+
+```bash
+ssh runpod-llama 'llama-server --version'   # 非対話でもフルパス不要で通る
+ssh runpod-llama 'echo $RUNPOD_POD_ID'
+```
+
+`~/.bashrc` の末尾に置くだけでは駄目で、Ubuntu の `~/.bashrc` は冒頭の
+`[ -z "$PS1" ] && return` で非対話シェルを弾くため、`ssh <host> <command>` からは
+読まれない（先頭に入れている理由）。
 
 ## llama-server を動かす
 
@@ -124,6 +136,21 @@ ssh -f -N -L 8000:localhost:8000 runpod-llama
 hf download <repo> --include '*Q6_K*' --local-dir /workspace/models/<name>
 ```
 
+## 実測値（参考）
+
+RunPod EU-RO-1 / RTX PRO 4500 Blackwell (32GB) / 2026-08 時点。
+
+| 項目 | 実測 |
+|---|---|
+| イメージの pull + 展開（キャッシュ無し） | 3分44秒（圧縮 7.19GB） |
+| モデル DL 23.36GB（Xet 経由） | 38秒（約 615MB/s） |
+| `llama-server` 起動 → listening | 14秒 |
+| 生成速度（Qwen3.8-27B Q6_K、ctx 65536） | 33.1 tok/s |
+| VRAM 使用量（同上） | 25,940 / 32,623 MiB |
+
+llama.cpp は build 10523 / commit `d59d455fd`。Pod を立て直すたびに 15分前後の
+CUDA ビルドが要らなくなるのが、このイメージの主な効果。
+
 ## Hugging Face のトークンを渡す
 
 gated / private なリポジトリを引くにはトークンが要る。**イメージには絶対に焼かないこと。**
@@ -133,10 +160,11 @@ gated / private なリポジトリを引くにはトークンが要る。**イ�
 
 上の Pod 作成例の `env: { HF_TOKEN: $hf }` がそれ。Pod にだけ渡り、ディスクには残らない。
 
-これが SSH ログイン後にも効くのは、起動スクリプトが**大文字始まりの環境変数をすべて**
-`/etc/rp_environment`（`chmod 600`）に書き出し、`~/.bashrc` からそれを source するため
-（`PUBLIC_KEY` だけは除外している）。`RUNPOD_*` に限らずユーザーが `env` で渡した変数も
-そのまま見えるので、SSH で入って `hf download` を叩けば認証済みになる。
+これが SSH セッションでも効くのは、起動スクリプトが**大文字始まりの環境変数をすべて**
+`/etc/rp_environment`（`chmod 600`）に書き出し、`/etc/profile.d/` と `~/.bashrc` の先頭から
+読ませているため（`PUBLIC_KEY` だけは除外している）。`RUNPOD_*` に限らずユーザーが `env` で
+渡した変数もそのまま見えるので、SSH で入って `hf download` を叩けば認証済みになる。
+対話ログインでも `ssh <host> <command>` でも同じように効く。
 
 ```bash
 ssh runpod-llama
@@ -175,6 +203,12 @@ hf auth login          # 対話でトークンを貼る
   `ssh-keygen -t dsa` は失敗する。rsa / ecdsa / ed25519 は生成する
 - **`/etc/rp_environment` を chmod 600 にしている** — 上流と同じく大文字始まりの環境変数を
   すべて書き出す（`PUBLIC_KEY` のみ除外）ので、`RUNPOD_API_KEY` のような秘密が入りうるため
+- **`/etc/rp_environment` を `~/.bashrc` の末尾ではなく先頭と `/etc/profile.d/` から読ませる** —
+  上流の「末尾に追記」だと `ssh <host> <command>` の非対話シェルから読まれない。
+  このイメージは `PATH` まで `/etc/rp_environment` に依存しているので影響が大きい
+- **シェルが自分で管理する変数（`PWD` / `OLDPWD` / `SHLVL` / `TERM` / `_`）は書き出さない** —
+  すべてのシェル起動で source されるため、コンテナ起動時の値で上書きするとセッション側の
+  正しい値を壊す（`TERM` を固定すると SSH 越しの vim / tmux が壊れる）
 
 また、CUDA ドライバ（`libcuda.so.1`）はイメージに含まれない。GPU ホスト上では NVIDIA の
 コンテナランタイムが注入する。このため GPU の無い環境で `llama-server` を実行すると
@@ -205,8 +239,12 @@ IMAGE=llama-cpp-runpod:test ./test/test-image.sh
 
 確認している内容: `PUBLIC_KEY` の展開、sshd が 22 で listen すること、`PUBLIC_KEY` 無しでも
 起動すること、`llama-server --version` と共有ライブラリの解決、PyTorch の import、
-`/etc/rp_environment` の生成と `PUBLIC_KEY` の非混入、ホスト鍵・authorized_keys・モデルの重みが
-イメージに焼かれていないこと。
+`/etc/rp_environment` の生成（600、`PUBLIC_KEY` の非混入）、ホスト鍵・authorized_keys・
+モデルの重みがイメージに焼かれていないこと。
+
+SSH セッションの環境変数と `PATH` は、コンテナ内から自分自身へ SSH して実際の経路で
+検証している（`ssh <host> <command>` の非対話シェルと `bash -lc` のログインシェルの両方）。
+ポート公開が要らないので、docker デーモンがリモートでも動く。
 
 ### CI と公開
 
